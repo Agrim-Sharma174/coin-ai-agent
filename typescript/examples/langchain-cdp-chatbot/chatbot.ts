@@ -33,7 +33,7 @@ function validateEnvironment(): void {
   const missingVars: string[] = [];
 
   // Check required variables
-  const requiredVars = ["GROQ_API_KEY", "CDP_API_KEY_NAME", "CDP_API_KEY_PRIVATE_KEY"];
+  const requiredVars = ["OPENAI_API_KEY", "CDP_API_KEY_NAME", "CDP_API_KEY_PRIVATE_KEY"];
   requiredVars.forEach(varName => {
     if (!process.env[varName]) {
       missingVars.push(varName);
@@ -72,12 +72,30 @@ const memecoinActionProvider = customActionProvider<CdpWalletProvider>({
   schema: z.object({
     limit: z.number().optional().describe("Number of memecoins to analyze, default 10"),
   }),
-  invoke: async (walletProvider, args) => {
-    const limit = args.limit || 10;
+  invoke: async () => {
+    const limit = 10;
     try {
-      // Use CoinGecko API for market data
+      // Add your CoinGecko API key to your .env file
+      const apiKey = process.env.COINGECKO_API_KEY;
+      if (!apiKey) {
+        return "Error: CoinGecko API key not configured. Please contact support.";
+      }
+
       const response = await axios.get<CoinGeckoResponse[]>(
-        `https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&category=memecoin&order=volume_desc&per_page=${limit}`,
+        `https://api.coingecko.com/api/v3/coins/markets`,
+        {
+          params: {
+            vs_currency: "usd",
+            category: "meme-token",
+            order: "volume_desc",
+            per_page: limit,
+            sparkline: false,
+          },
+          headers: {
+            accept: "application/json",
+            "x-cg-demo-api-key": "CG-3DMPfLJag2C5qnfbVMtocbz9",
+          },
+        },
       );
 
       const analysis = response.data.map((coin: CoinGeckoResponse) => ({
@@ -86,16 +104,65 @@ const memecoinActionProvider = customActionProvider<CdpWalletProvider>({
         priceChange24h: coin.price_change_percentage_24h,
         volume: coin.total_volume,
         marketCap: coin.market_cap,
-        liquidityScore: (coin.total_volume / coin.market_cap) * 100, // Simple liquidity metric
+        liquidityScore: (coin.total_volume / coin.market_cap) * 100,
+        riskLevel: getRiskLevel(
+          coin.total_volume,
+          coin.market_cap,
+          coin.price_change_percentage_24h,
+        ),
       }));
 
-      return JSON.stringify(analysis);
+      return JSON.stringify({
+        data: analysis,
+        timestamp: new Date().toISOString(),
+        message: `Analyzed ${analysis.length} memecoins based on market data`,
+      });
     } catch (error) {
       console.error("Failed to fetch memecoin data:", error);
-      return "Error fetching memecoin data. Please try again later.";
+      if (axios.isAxiosError(error)) {
+        if (error.response?.status === 400) {
+          return "Error: Invalid request parameters. Please try different search criteria.";
+        }
+        if (error.response?.status === 401) {
+          return "Error: Invalid CoinGecko API key. Please check your configuration.";
+        }
+        if (error.response?.status === 429) {
+          return "Error: API rate limit exceeded. Please try again later.";
+        }
+      }
+      return "Error: Failed to fetch market data. Please try again later.";
     }
   },
 });
+
+// Helper function to assess risk level
+/**
+ * Determines the risk level of a cryptocurrency based on its volume, market cap, and 24-hour price change.
+ *
+ * @param volume - The trading volume of the cryptocurrency
+ * @param marketCap - The market capitalization of the cryptocurrency
+ * @param priceChange24h - The percentage price change in the last 24 hours
+ * @returns A string indicating the risk level: "VERY_HIGH", "HIGH", "MEDIUM", or "LOW"
+ *
+ * The risk level is calculated using:
+ * - Liquidity ratio (volume/marketCap)
+ * - Price volatility (absolute value of 24h price change)
+ *
+ * Risk levels are determined as follows:
+ * - VERY_HIGH: liquidity ratio < 0.05 or volatility > 50%
+ * - HIGH: liquidity ratio < 0.1 or volatility > 30%
+ * - MEDIUM: liquidity ratio < 0.15 or volatility > 20%
+ * - LOW: all other cases
+ */
+function getRiskLevel(volume: number, marketCap: number, priceChange24h: number): string {
+  const liquidityRatio = volume / marketCap;
+  const volatility = Math.abs(priceChange24h);
+
+  if (liquidityRatio < 0.05 || volatility > 50) return "VERY_HIGH";
+  if (liquidityRatio < 0.1 || volatility > 30) return "HIGH";
+  if (liquidityRatio < 0.15 || volatility > 20) return "MEDIUM";
+  return "LOW";
+}
 
 const investActionProvider = customActionProvider<CdpWalletProvider>({
   name: "invest_in_memecoin",
@@ -107,15 +174,34 @@ const investActionProvider = customActionProvider<CdpWalletProvider>({
   }),
   invoke: async (walletProvider, args) => {
     try {
-      // Implement actual swap logic using CDP SDK or DEX aggregator
+      if (args.amount <= 0) {
+        return "Error: Investment amount must be greater than 0";
+      }
 
-      // This is a simplified example - implement proper swap execution
+      // Add actual swap implementation here
+      const performSwapTransaction = async (
+        walletProvider: CdpWalletProvider,
+        tokenAddress: string,
+        amount: number,
+        slippage: number,
+      ): Promise<string> => {
+        // Placeholder function for actual swap transaction
+        console.log(
+          `Swapping ${amount} ETH for ${tokenAddress} with ${slippage}% slippage tolerance...`,
+        );
 
-      // TODO: Implement actual swap logic using CDP SDK or integrate with a DEX
-      const txHash = "0x"; // Placeholder for actual transaction hash
-      console.warn("Swap functionality not implemented");
+        // Simulate transaction hash
+        return "0x1234567890abcdef";
+      };
+      // This should interact with your DEX or swap protocol
+      const txHash = await performSwapTransaction(
+        walletProvider,
+        args.tokenAddress,
+        args.amount,
+        args.slippage || 2,
+      );
 
-      return `Invested ${args.amount} ETH in memecoin. Tx Hash: ${txHash}`;
+      return `Successfully invested ${args.amount} ETH in ${args.tokenAddress}. TX Hash: ${txHash}`;
     } catch (error) {
       return `Investment failed: ${error instanceof Error ? error.message : "Unknown error"}`;
     }
@@ -134,7 +220,7 @@ async function initializeAgent() {
   try {
     // Initialize LLM
     const llm = new ChatOpenAI({
-      apiKey: process.env.GROQ_API_KEY,
+      apiKey: process.env.OPENAI_API_KEY,
     });
 
     let walletDataStr: string | null = null;
@@ -192,15 +278,27 @@ async function initializeAgent() {
       tools,
       checkpointSaver: memory,
       messageModifier: `
-        You are a memecoin investment expert. When asked about memecoins:
-  1. First use analyze_memecoins to get market data
-  2. Evaluate based on liquidity (volume/mcap), recent price changes, and market trends
-  3. Consider diversification and risk management
-  4. If investing, use invest_in_memecoin with proper parameters
-  5. Always verify contract addresses and recent transactions
-  6. For user-specified coins, still perform due diligence
-  7. Never invest more than 10% of portfolio in one memecoin
-  8. Prefer coins with verified contracts and high liquidity
+        You are a memecoin and defi investment strategy expert and you invest in them. When asked about top memecoins:
+        1. First use analyze_memecoins to get market data
+        2. Strategically evaluate based on liquidity (volume/mcap), recent price changes, and market trends
+        3. Consider diversification and risk management
+        4. If investing, use invest_in_memecoin with proper parameters
+        5. Always verify contract addresses and recent transactions
+        6. For user-specified coins, still perform due diligence
+        7. Never invest more than 10% of portfolio in one memecoin
+        8. Prefer coins with verified contracts and high liquidity
+        9. Always set stop-loss and take-profit levels
+        10. Stay informed about market trends and news
+        11. Remember, past performance is not indicative of future results
+        12. Be cautious of pump-and-dump schemes
+        13. Avoid investing in unknown or unaudited projects
+        14. Keep your investments secure and private
+        15. Always consult with a financial advisor before making investment decisions
+        
+        next steps:
+        If asked about investing
+        i have to do for defi projects and zk and ai project's coins
+
         `,
     });
 

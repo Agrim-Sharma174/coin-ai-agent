@@ -18,6 +18,7 @@
     "@langchain/core": "^0.3.39",
     "@langchain/langgraph": "^0.2.45",
     "@langchain/openai": "^0.3.17",
+    "axios": "^1.7.9",
     "dotenv": "^16.4.5",
     "groq-sdk": "^0.15.0",
     "viem": "^2.22.23",
