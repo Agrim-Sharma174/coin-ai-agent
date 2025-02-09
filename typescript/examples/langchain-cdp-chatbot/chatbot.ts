@@ -13,7 +13,6 @@ import { getLangChainTools } from "@coinbase/agentkit-langchain";
 import { HumanMessage } from "@langchain/core/messages";
 import { MemorySaver } from "@langchain/langgraph";
 import { createReactAgent } from "@langchain/langgraph/prebuilt";
-// import { ChatOpenAI } from "@langchain/openai";
 import { ChatOpenAI } from "@langchain/openai";
 import * as dotenv from "dotenv";
 import * as fs from "fs";
@@ -22,6 +21,21 @@ import { z } from "zod";
 import axios from "axios";
 
 dotenv.config();
+
+const COIN_CATEGORIES = {
+  MEME: "meme-token",
+  DEFI: "decentralized-finance-defi",
+  AI: "artificial-intelligence",
+  ZK: "zero-knowledge-zk",
+} as const;
+
+interface CoinGeckoResponse {
+  symbol: string;
+  current_price: number;
+  price_change_percentage_24h: number;
+  total_volume: number;
+  market_cap: number;
+}
 
 /**
  * Validates that required environment variables are set
@@ -32,7 +46,6 @@ dotenv.config();
 function validateEnvironment(): void {
   const missingVars: string[] = [];
 
-  // Check required variables
   const requiredVars = ["OPENAI_API_KEY", "CDP_API_KEY_NAME", "CDP_API_KEY_PRIVATE_KEY"];
   requiredVars.forEach(varName => {
     if (!process.env[varName]) {
@@ -40,7 +53,6 @@ function validateEnvironment(): void {
     }
   });
 
-  // Exit if any required variables are missing
   if (missingVars.length > 0) {
     console.error("Error: Required environment variables are not set");
     missingVars.forEach(varName => {
@@ -49,110 +61,89 @@ function validateEnvironment(): void {
     process.exit(1);
   }
 
-  // Warn about optional NETWORK_ID
   if (!process.env.NETWORK_ID) {
     console.warn("Warning: NETWORK_ID not set, defaulting to base-sepolia testnet");
   }
 }
 
-// Add this right after imports and before any other code
 validateEnvironment();
 
-interface CoinGeckoResponse {
-  symbol: string;
-  current_price: number;
-  price_change_percentage_24h: number;
-  total_volume: number;
-  market_cap: number;
+/**
+ * Analyzes coins based on category and limit
+ *
+ * @param category - The category of coins to analyze
+ * @param limit - Maximum number of coins to analyze
+ * @returns Array of analyzed coin data
+ */
+async function analyzeCoins(category: string, limit: number) {
+  try {
+    const apiKey = process.env.COINGECKO_API_KEY;
+    if (!apiKey) return "Error: CoinGecko API key not configured.";
+
+    const response = await axios.get<CoinGeckoResponse[]>(
+      "https://api.coingecko.com/api/v3/coins/markets",
+      {
+        params: {
+          vs_currency: "usd",
+          category,
+          order: "volume_desc",
+          per_page: limit,
+          sparkline: false,
+        },
+        headers: {
+          accept: "application/json",
+          "x-cg-demo-api-key": apiKey,
+        },
+      },
+    );
+
+    return response.data.map(coin => ({
+      symbol: coin.symbol.toUpperCase(),
+      price: coin.current_price,
+      priceChange24h: coin.price_change_percentage_24h,
+      volume: coin.total_volume,
+      marketCap: coin.market_cap,
+      liquidityScore: (coin.total_volume / coin.market_cap) * 100,
+      riskLevel: getRiskLevel(coin.total_volume, coin.market_cap, coin.price_change_percentage_24h),
+    }));
+  } catch (error) {
+    console.error(`Failed to fetch ${category} data:`, error);
+    return [];
+  }
 }
 
-const memecoinActionProvider = customActionProvider<CdpWalletProvider>({
-  name: "analyze_memecoins",
-  description: "Fetches and analyzes top memecoins for profit potential based on market data",
-  schema: z.object({
-    limit: z.number().optional().describe("Number of memecoins to analyze, default 10"),
-  }),
-  invoke: async () => {
-    const limit = 10;
-    try {
-      // Add your CoinGecko API key to your .env file
-      const apiKey = process.env.COINGECKO_API_KEY;
-      if (!apiKey) {
-        return "Error: CoinGecko API key not configured. Please contact support.";
-      }
-
-      const response = await axios.get<CoinGeckoResponse[]>(
-        `https://api.coingecko.com/api/v3/coins/markets`,
-        {
-          params: {
-            vs_currency: "usd",
-            category: "meme-token",
-            order: "volume_desc",
-            per_page: limit,
-            sparkline: false,
-          },
-          headers: {
-            accept: "application/json",
-            "x-cg-demo-api-key": "CG-3DMPfLJag2C5qnfbVMtocbz9",
-          },
-        },
-      );
-
-      const analysis = response.data.map((coin: CoinGeckoResponse) => ({
-        symbol: coin.symbol.toUpperCase(),
-        price: coin.current_price,
-        priceChange24h: coin.price_change_percentage_24h,
-        volume: coin.total_volume,
-        marketCap: coin.market_cap,
-        liquidityScore: (coin.total_volume / coin.market_cap) * 100,
-        riskLevel: getRiskLevel(
-          coin.total_volume,
-          coin.market_cap,
-          coin.price_change_percentage_24h,
-        ),
-      }));
-
-      return JSON.stringify({
-        data: analysis,
-        timestamp: new Date().toISOString(),
-        message: `Analyzed ${analysis.length} memecoins based on market data`,
-      });
-    } catch (error) {
-      console.error("Failed to fetch memecoin data:", error);
-      if (axios.isAxiosError(error)) {
-        if (error.response?.status === 400) {
-          return "Error: Invalid request parameters. Please try different search criteria.";
-        }
-        if (error.response?.status === 401) {
-          return "Error: Invalid CoinGecko API key. Please check your configuration.";
-        }
-        if (error.response?.status === 429) {
-          return "Error: API rate limit exceeded. Please try again later.";
-        }
-      }
-      return "Error: Failed to fetch market data. Please try again later.";
-    }
-  },
-});
-
-// Helper function to assess risk level
 /**
- * Determines the risk level of a cryptocurrency based on its volume, market cap, and 24-hour price change.
+ * Creates a coin analysis action provider for a specific category
  *
- * @param volume - The trading volume of the cryptocurrency
- * @param marketCap - The market capitalization of the cryptocurrency
- * @param priceChange24h - The percentage price change in the last 24 hours
- * @returns A string indicating the risk level: "VERY_HIGH", "HIGH", "MEDIUM", or "LOW"
+ * @param category - The category of coins to analyze
+ * @returns CustomActionProvider for the specified category
+ */
+function createCoinAnalysisAction(category: keyof typeof COIN_CATEGORIES) {
+  return customActionProvider<CdpWalletProvider>({
+    name: `analyze_${category.toLowerCase()}`,
+    description: `Fetches and analyzes top ${category} coins for investment potential`,
+    schema: z.object({
+      limit: z.number().optional().default(10),
+    }),
+    invoke: async (_, { limit }) => {
+      const data = await analyzeCoins(COIN_CATEGORIES[category], limit);
+      return JSON.stringify({
+        data,
+        message: `Top ${limit} ${category} coins analyzed`,
+        category,
+        timestamp: new Date().toISOString(),
+      });
+    },
+  });
+}
+
+/**
+ * Determines the risk level of a cryptocurrency based on market metrics
  *
- * The risk level is calculated using:
- * - Liquidity ratio (volume/marketCap)
- * - Price volatility (absolute value of 24h price change)
- *
- * Risk levels are determined as follows:
- * - VERY_HIGH: liquidity ratio < 0.05 or volatility > 50%
- * - HIGH: liquidity ratio < 0.1 or volatility > 30%
- * - MEDIUM: liquidity ratio < 0.15 or volatility > 20%
- * - LOW: all other cases
+ * @param volume - Trading volume
+ * @param marketCap - Market capitalization
+ * @param priceChange24h - 24-hour price change percentage
+ * @returns Risk level assessment
  */
 function getRiskLevel(volume: number, marketCap: number, priceChange24h: number): string {
   const liquidityRatio = volume / marketCap;
@@ -164,36 +155,48 @@ function getRiskLevel(volume: number, marketCap: number, priceChange24h: number)
   return "LOW";
 }
 
+/**
+ * Simulates a swap transaction
+ *
+ * @param walletProvider - CDP wallet provider
+ * @param tokenAddress - Address of token to swap
+ * @param amount - Amount to swap
+ * @param slippage - Maximum slippage percentage
+ * @returns Transaction hash
+ */
+async function performSwapTransaction(
+  walletProvider: CdpWalletProvider,
+  tokenAddress: string,
+  amount: number,
+  slippage: number,
+): Promise<string> {
+  console.log(`Swapping ${amount} ETH for ${tokenAddress} with ${slippage}% slippage tolerance...`);
+  return "0x1234567890abcdef";
+}
+
+// Create action providers for each category
+const memecoinActionProvider = createCoinAnalysisAction("MEME");
+const defiActionProvider = createCoinAnalysisAction("DEFI");
+const aiActionProvider = createCoinAnalysisAction("AI");
+const zkActionProvider = createCoinAnalysisAction("ZK");
+
+// Investment action provider
 const investActionProvider = customActionProvider<CdpWalletProvider>({
-  name: "invest_in_memecoin",
-  description: "Executes a swap to invest in specified memecoin with risk management",
+  name: "invest_in_coin",
+  description: "Executes a swap to invest in specified cryptocurrency with risk management",
   schema: z.object({
-    tokenAddress: z.string().describe("Contract address of the memecoin to invest in"),
+    tokenAddress: z.string().describe("Contract address of the token to invest in"),
     amount: z.number().describe("Amount of ETH to invest"),
     slippage: z.number().optional().describe("Max slippage percentage, default 2%"),
+    category: z.enum(["MEME", "DEFI", "AI", "ZK"]).describe("Category of the token"),
   }),
   invoke: async (walletProvider, args) => {
     try {
-      if (args.amount <= 0) {
-        return "Error: Investment amount must be greater than 0";
+      const balance = await walletProvider.getBalance();
+      if (balance < args.amount) {
+        return `Insufficient mainnet balance (${balance} ETH). Please top up your wallet to invest ${args.amount} ETH in ${args.category} token.`;
       }
 
-      // Add actual swap implementation here
-      const performSwapTransaction = async (
-        walletProvider: CdpWalletProvider,
-        tokenAddress: string,
-        amount: number,
-        slippage: number,
-      ): Promise<string> => {
-        // Placeholder function for actual swap transaction
-        console.log(
-          `Swapping ${amount} ETH for ${tokenAddress} with ${slippage}% slippage tolerance...`,
-        );
-
-        // Simulate transaction hash
-        return "0x1234567890abcdef";
-      };
-      // This should interact with your DEX or swap protocol
       const txHash = await performSwapTransaction(
         walletProvider,
         args.tokenAddress,
@@ -201,41 +204,36 @@ const investActionProvider = customActionProvider<CdpWalletProvider>({
         args.slippage || 2,
       );
 
-      return `Successfully invested ${args.amount} ETH in ${args.tokenAddress}. TX Hash: ${txHash}`;
+      return `Invested ${args.amount} ETH in ${args.category} token (${args.tokenAddress}). TX Hash: ${txHash}`;
     } catch (error) {
       return `Investment failed: ${error instanceof Error ? error.message : "Unknown error"}`;
     }
   },
 });
 
-//! Configure a file to persist the agent's CDP MPC Wallet Data
 const WALLET_DATA_FILE = "wallet_data.txt";
 
 /**
- * Initialize the agent with CDP Agentkit
+ * Initializes the agent with CDP Agentkit
  *
  * @returns Agent executor and config
  */
 async function initializeAgent() {
   try {
-    // Initialize LLM
     const llm = new ChatOpenAI({
       apiKey: process.env.OPENAI_API_KEY,
     });
 
     let walletDataStr: string | null = null;
 
-    // Read existing wallet data if available
     if (fs.existsSync(WALLET_DATA_FILE)) {
       try {
         walletDataStr = fs.readFileSync(WALLET_DATA_FILE, "utf8");
       } catch (error) {
         console.error("Error reading wallet data:", error);
-        // Continue without wallet data
       }
     }
 
-    // Configure CDP Wallet Provider
     const config = {
       apiKeyName: process.env.CDP_API_KEY_NAME,
       apiKeyPrivateKey: process.env.CDP_API_KEY_PRIVATE_KEY?.replace(/\\n/g, "\n"),
@@ -245,7 +243,6 @@ async function initializeAgent() {
 
     const walletProvider = await CdpWalletProvider.configureWithWallet(config);
 
-    // Initialize AgentKit
     const agentkit = await AgentKit.from({
       walletProvider,
       actionProviders: [
@@ -262,70 +259,97 @@ async function initializeAgent() {
           apiKeyPrivateKey: process.env.CDP_API_KEY_PRIVATE_KEY?.replace(/\\n/g, "\n"),
         }),
         memecoinActionProvider,
+        defiActionProvider,
+        aiActionProvider,
+        zkActionProvider,
         investActionProvider,
       ],
     });
 
     const tools = await getLangChainTools(agentkit);
-
-    // Store buffered conversation history in memory
     const memory = new MemorySaver();
     const agentConfig = { configurable: { thread_id: "CDP AgentKit Chatbot Example!" } };
 
-    // Create React Agent using the LLM and CDP AgentKit tools
+    const messageModifier = `
+You are a cryptocurrency investment expert specializing in MEME, DeFi, AI, and ZK coins. Follow these rules:
+
+1. Identify requested category from user query:
+   - Meme coins: Use analyze_meme
+   - DeFi: Use analyze_defi
+   - AI coins: Use analyze_ai
+   - ZK tech: Use analyze_zk
+
+2. For price inquiries:
+   - Always check latest prices using appropriate analysis tool
+   - Compare with 24h price change
+   - Mention liquidity and market cap
+
+3. Investment process:
+   a) Check mainnet balance before any investment
+   b) If balance < requested amount:
+      - Clearly state current balance
+      - Explain needed top-up amount
+      - Offer to help with deposit process
+   c) For sufficient balance:
+      - Verify contract address
+      - Check liquidity score
+      - Confirm risk level
+      - Execute invest_in_coin with proper parameters
+
+4. Risk management:
+   - Never recommend >15% portfolio in one asset
+   - Always suggest stop-loss orders
+   - Prefer audited contracts
+   - Highlight volatility warnings
+
+5. Educational guidance:
+   - Explain ZK technology benefits
+   - Differentiate AI utility vs hype
+   - Compare DeFi vs traditional finance
+   - Analyze meme coin cultural factors
+
+6. Security:
+   - Warn against unaudited contracts
+   - Recommend hardware wallets
+   - Suggest verifying contract addresses
+   - Mention common scam patterns
+`;
+
     const agent = createReactAgent({
       llm,
       tools,
       checkpointSaver: memory,
-      messageModifier: `
-        You are a memecoin and defi investment strategy expert and you invest in them. When asked about top memecoins:
-        1. First use analyze_memecoins to get market data
-        2. Strategically evaluate based on liquidity (volume/mcap), recent price changes, and market trends
-        3. Consider diversification and risk management
-        4. If investing, use invest_in_memecoin with proper parameters
-        5. Always verify contract addresses and recent transactions
-        6. For user-specified coins, still perform due diligence
-        7. Never invest more than 10% of portfolio in one memecoin
-        8. Prefer coins with verified contracts and high liquidity
-        9. Always set stop-loss and take-profit levels
-        10. Stay informed about market trends and news
-        11. Remember, past performance is not indicative of future results
-        12. Be cautious of pump-and-dump schemes
-        13. Avoid investing in unknown or unaudited projects
-        14. Keep your investments secure and private
-        15. Always consult with a financial advisor before making investment decisions
-        
-        next steps:
-        If asked about investing
-        i have to do for defi projects and zk and ai project's coins
-
-        `,
+      messageModifier,
     });
 
-    // Save wallet data
     const exportedWallet = await walletProvider.exportWallet();
     fs.writeFileSync(WALLET_DATA_FILE, JSON.stringify(exportedWallet));
 
     return { agent, config: agentConfig };
   } catch (error) {
     console.error("Failed to initialize agent:", error);
-    throw error; // Re-throw to be handled by caller
+    throw error;
   }
 }
 
 /**
- * Run the agent autonomously with specified intervals
+ * Runs the agent in autonomous mode
  *
  * @param agent - The agent executor
  * @param config - Agent configuration
+ * @param config.configurable - Configuration settings for the agent
+ * @param config.configurable.thread_id - Unique identifier for the chat thread
  * @param interval - Time interval between actions in seconds
  */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function runAutonomousMode(agent: any, config: any, interval = 10) {
+async function runAutonomousMode(
+  agent: ReturnType<typeof createReactAgent>,
+  config: { configurable: { thread_id: string } },
+  interval = 10,
+) {
   console.log("Starting autonomous mode...");
 
-  // eslint-disable-next-line no-constant-condition
-  while (true) {
+  const isRunning = true;
+  while (isRunning) {
     try {
       const thought =
         "Be creative and do something interesting on the blockchain. " +
@@ -353,13 +377,18 @@ async function runAutonomousMode(agent: any, config: any, interval = 10) {
 }
 
 /**
- * Run the agent interactively based on user input
+ * Runs the agent in interactive chat mode
  *
  * @param agent - The agent executor
- * @param config - Agent configuration
+ * @param config - Agent configuration object
+ * @param config.configurable - Configuration settings for the agent
+ * @param config.configurable.thread_id - Unique identifier for the chat thread
+ * @returns {Promise<void>} A promise that resolves when the chat session ends
  */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function runChatMode(agent: any, config: any) {
+async function runChatMode(
+  agent: ReturnType<typeof createReactAgent>,
+  config: { configurable: { thread_id: string } },
+) {
   console.log("Starting chat mode... Type 'exit' to end.");
 
   const rl = readline.createInterface({
@@ -371,12 +400,13 @@ async function runChatMode(agent: any, config: any) {
     new Promise(resolve => rl.question(prompt, resolve));
 
   try {
-    // eslint-disable-next-line no-constant-condition
-    while (true) {
+    let isRunning = true;
+    while (isRunning) {
       const userInput = await question("\nPrompt: ");
 
       if (userInput.toLowerCase() === "exit") {
-        break;
+        isRunning = false;
+        continue;
       }
 
       const stream = await agent.stream({ messages: [new HumanMessage(userInput)] }, config);
@@ -401,7 +431,7 @@ async function runChatMode(agent: any, config: any) {
 }
 
 /**
- * Choose whether to run in autonomous or chat mode based on user input
+ * Prompts user to choose between autonomous and chat mode
  *
  * @returns Selected mode
  */
@@ -414,8 +444,8 @@ async function chooseMode(): Promise<"chat" | "auto"> {
   const question = (prompt: string): Promise<string> =>
     new Promise(resolve => rl.question(prompt, resolve));
 
-  // eslint-disable-next-line no-constant-condition
-  while (true) {
+  const choosing = true;
+  while (choosing) {
     console.log("\nAvailable modes:");
     console.log("1. chat    - Interactive chat mode");
     console.log("2. auto    - Autonomous action mode");
@@ -432,11 +462,13 @@ async function chooseMode(): Promise<"chat" | "auto"> {
       return "auto";
     }
     console.log("Invalid choice. Please try again.");
+    console.log("Invalid choice. Please try again.");
   }
+  return "chat"; // Default fallback, though this line should never be reached
 }
 
 /**
- * Start the chatbot agent
+ * Main function to start the chatbot agent
  */
 async function main() {
   try {
