@@ -19,6 +19,7 @@ import * as fs from "fs";
 import * as readline from "readline";
 import { z } from "zod";
 import axios from "axios";
+// import { SystemMessage } from "@langchain/core/messages";
 
 dotenv.config();
 
@@ -211,6 +212,42 @@ const investActionProvider = customActionProvider<CdpWalletProvider>({
   },
 });
 
+// Define the expected data structure (Optional)
+interface KewordResponse {
+  time?: string;
+  timePeriod?: string;
+  trend?: string;
+  volume?: string;
+}
+const KeyWordActionProvider = customActionProvider<CdpWalletProvider>({
+  name: "fetch_keyword",
+  description: "Fetches the top trending keywords on Twitter",
+  schema: z.object({
+    platform: z.string().describe("Which platform to fetch keywords from"),
+  }),
+  invoke: async () => {
+    try {
+      const response = await axios.get<KewordResponse[]>(
+        `https://api.apify.com/v2/datasets/0VEWlmNYYkmymxOC3/items?token=${process.env.APIFY_KEYWORDS_API_KEY}`,
+      );
+
+      const formattedData = response.data
+        .map(
+          keyword =>
+            `Keyword: ${keyword.trend || "N/A"}\n` +
+            `Trending since: ${keyword.time || "N/A"}\n` +
+            `Tweets: ${keyword.volume || "N/A"}\n` +
+            `Status: ${keyword.timePeriod || "N/A"}`,
+        )
+        .join("\n\n");
+
+      return formattedData;
+    } catch (error) {
+      return `Failed to fetch keywords: ${error instanceof Error ? error.message : "Unknown error"}`;
+    }
+  },
+});
+
 const WALLET_DATA_FILE = "wallet_data.txt";
 
 /**
@@ -263,6 +300,7 @@ async function initializeAgent() {
         aiActionProvider,
         zkActionProvider,
         investActionProvider,
+        KeyWordActionProvider,
       ],
     });
 
@@ -278,6 +316,7 @@ You are a cryptocurrency investment expert specializing in MEME, DeFi, AI, and Z
    - DeFi: Use analyze_defi
    - AI coins: Use analyze_ai
    - ZK tech: Use analyze_zk
+   - Getting the most trending keywords: Use fetch_keyword, out of all the keywords which you received, strategically predict which of them have the potential to become trending memecoin in future.
 
 2. For price inquiries:
    - Always check latest prices using appropriate analysis tool
@@ -319,7 +358,7 @@ You are a cryptocurrency investment expert specializing in MEME, DeFi, AI, and Z
       llm,
       tools,
       checkpointSaver: memory,
-      messageModifier,
+      messageModifier: messageModifier,
     });
 
     const exportedWallet = await walletProvider.exportWallet();
@@ -355,7 +394,12 @@ async function runAutonomousMode(
         "Be creative and do something interesting on the blockchain. " +
         "Choose an action or set of actions and execute it that highlights your abilities.";
 
-      const stream = await agent.stream({ messages: [new HumanMessage(thought)] }, config);
+      const stream = await agent.stream(
+        {
+          messages: [new HumanMessage(thought)],
+        },
+        config,
+      );
 
       for await (const chunk of stream) {
         if ("agent" in chunk) {
@@ -409,7 +453,12 @@ async function runChatMode(
         continue;
       }
 
-      const stream = await agent.stream({ messages: [new HumanMessage(userInput)] }, config);
+      const stream = await agent.stream(
+        {
+          messages: [new HumanMessage(userInput)], // Only include HumanMessage
+        },
+        config,
+      );
 
       for await (const chunk of stream) {
         if ("agent" in chunk) {
